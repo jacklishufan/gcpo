@@ -444,6 +444,9 @@ class FSDPWorker(Worker):
                 config=self.config.actor,
                 actor_module=self.fsdp_module,
                 actor_optimizer=self.optimizer,
+                tokenizer=self.tokenizer,
+                processor=self.processor,
+                data_config=self.config.data,
             )
 
         if self._has_critic:
@@ -464,6 +467,9 @@ class FSDPWorker(Worker):
             self.ref_policy = DataParallelPPOActor(
                 config=self.config.ref,
                 actor_module=self.ref_fsdp_module,
+                tokenizer=self.tokenizer,
+                processor=self.processor,
+                data_config=self.config.data,
             )
 
         if self._has_actor or self._has_critic:

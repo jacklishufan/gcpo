@@ -182,3 +182,4 @@ tensorboard_log/
 # data
 images/
 images*
+checkpoints

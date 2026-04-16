@@ -17,15 +17,55 @@ ActorRolloutRef config
 
 from dataclasses import dataclass, field
 
+from ..utils.py_functional import get_abs_path
 from .actor import ActorConfig, FSDPConfig, LoraConfig, ModelConfig, OptimConfig, RefConfig
 from .critic import CriticConfig
 from .reward import RewardConfig
 from .rollout import RolloutConfig
 
+from typing import Optional
+@dataclass
+class DataConfig:
+    train_files: str = ""
+    val_files: str = ""
+    prompt_key: str = "prompt"
+    answer_key: str = "answer"
+    image_key: str = "images"
+    video_key: str = "videos"
+    image_dir: Optional[str] = None
+    video_fps: float = 2.0
+    max_prompt_length: int = 512
+    max_response_length: int = 512
+    rollout_batch_size: int = 512
+    mini_rollout_batch_size: Optional[int] = None
+    val_batch_size: int = -1
+    format_prompt: Optional[str] = None
+    override_chat_template: Optional[str] = None
+    shuffle: bool = True
+    seed: int = 1
+    min_pixels: Optional[int] = 262144
+    max_pixels: Optional[int] = 4194304
+    filter_overlong_prompts: bool = True
+    filter_overlong_prompts_workers: int = 16
+    # Importance weighting config
+    use_importance_weighting: bool = False
+    importance_weighting_type: str = "kl"
+    negative_prompt_type: str = "wrong_answer"
+    negative_format_prompt: Optional[str] = None
+    importance_normalization: str = "softmax"
+    importance_normalization_temperature: float = 0.1
+
+    def post_init(self):
+        self.image_dir = get_abs_path(self.image_dir, prompt="Image directory")
+        self.format_prompt = get_abs_path(self.format_prompt, prompt="Format prompt file")
+        self.negative_format_prompt = get_abs_path(self.negative_format_prompt, prompt="Negative format prompt file")
+        self.override_chat_template = get_abs_path(self.override_chat_template, prompt="Chat template file")
+
 
 __all__ = [
     "ActorConfig",
     "CriticConfig",
+    "DataConfig",
     "FSDPConfig",
     "LoraConfig",
     "ModelConfig",
@@ -40,6 +80,7 @@ __all__ = [
 @dataclass
 class WorkerConfig:
     hybrid_engine: bool = True
+    data: DataConfig = field(default_factory=DataConfig)
     actor: ActorConfig = field(default_factory=ActorConfig)
     critic: CriticConfig = field(default_factory=CriticConfig)
     ref: RefConfig = field(default_factory=RefConfig)

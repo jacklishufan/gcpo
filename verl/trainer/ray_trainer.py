@@ -59,6 +59,7 @@ from .metrics import (
     compute_timing_metrics,
     reduce_metrics,
 )
+import wandb
 
 
 class Role(IntEnum):
@@ -657,9 +658,40 @@ class RayPPOTrainer:
 
                 # update actor
                 if self.config.trainer.critic_warmup <= self.global_step:
+                    # Extend aug tensors with responses so they match the full-sequence shape of input_ids.
+                    # This must be done here (after rollout) because responses are not available at dataset time.
+                    if self.config.data.use_importance_weighting:
+                        responses = batch.batch["responses"]
+                        response_len = responses.size(-1)
+                        # Use response_mask (not ones) to match how the normal attention_mask is built in rollout:
+                        # tokens after EOS are masked out (0), not counted as valid.
+                        response_mask = batch.batch["response_mask"]
+
+                        batch.batch["input_ids_aug"] = torch.cat(
+                            [batch.batch["input_ids_aug"], responses], dim=-1
+                        )
+                        batch.batch["attention_mask_aug"] = torch.cat(
+                            [batch.batch["attention_mask_aug"], response_mask], dim=-1
+                        )
+                        pos_aug = batch.batch["position_ids_aug"]
+                        if pos_aug.dim() == 3:  # mrope (batch, 4, prompt_len)
+                            last_pos = pos_aug[:, :, -1:]
+                            delta = torch.arange(1, response_len + 1, device=last_pos.device).view(1, 1, -1)
+                            batch.batch["position_ids_aug"] = torch.cat([pos_aug, last_pos + delta], dim=-1)
+                        else:
+                            last_pos = pos_aug[:, -1:]
+                            delta = torch.arange(1, response_len + 1, device=last_pos.device).unsqueeze(0)
+                            batch.batch["position_ids_aug"] = torch.cat([pos_aug, last_pos + delta], dim=-1)
+
                     with timer("update_actor", timing_raw):
                         actor_output = self.actor_rollout_ref_wg.update_actor(batch)
-
+                    if "importance_weights_viz_html" in actor_output.non_tensor_batch:
+                        
+                        html_content = actor_output.non_tensor_batch.pop("importance_weights_viz_html")
+                        if html_content:
+                            if wandb.run is not None:
+                                wandb.log({f"importance_weights_viz": wandb.Html(html_content[0])}, step=self.global_step)
+                            # self.logger.log(data={"importance_weights_viz": wandb.Html(html_content[0])}, step=self.global_step)
                     actor_metrics = reduce_metrics(actor_output.non_tensor_batch)
                     metrics.update(actor_metrics)
 

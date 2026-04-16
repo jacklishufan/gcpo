@@ -118,7 +118,8 @@ class vLLMRollout(BaseRollout):
 
         engine_kwargs = {}
         if processor is not None:  # only VLMs have processor
-            engine_kwargs["disable_mm_preprocessor_cache"] = True
+            #engine_kwargs["disable_mm_preprocessor_cache"] = True
+            engine_kwargs["mm_processor_cache_gb"] = 0
             if config.limit_images:
                 engine_kwargs["limit_mm_per_prompt"] = {"image": config.limit_images}
 
@@ -168,14 +169,26 @@ class vLLMRollout(BaseRollout):
         if kwargs:
             for key, value in kwargs.items():
                 if hasattr(self.sampling_params, key):
-                    old_value = getattr(self.sampling_params, key)
-                    old_sampling_params_args[key] = old_value
-                    setattr(self.sampling_params, key, value)
+                    if key == "eos_token_id":
+                            self.sampling_params.update_from_generation_config(
+                                generation_config={"eos_token_id": value},
+                                eos_token_id=value if isinstance(value, int) else None,
+                            )
+                    else:
+                        old_value = getattr(self.sampling_params, key)
+                        old_sampling_params_args[key] = old_value
+                        setattr(self.sampling_params, key, value)
 
         yield
         # roll back to previous sampling params
         for key, value in old_sampling_params_args.items():
-            setattr(self.sampling_params, key, value)
+            if key == "eos_token_id":
+                    self.sampling_params.update_from_generation_config(
+                        generation_config={"eos_token_id": value},
+                        eos_token_id=value if isinstance(value, int) else None,
+                    )
+            else:
+                setattr(self.sampling_params, key, value)
 
     @torch.no_grad()
     def generate_sequences(self, prompts: DataProto) -> DataProto:

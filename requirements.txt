@@ -1,7 +1,7 @@
 accelerate
 codetiming
 datasets
-flash-attn>=2.4.3
+#flash-attn>=2.4.3
 liger-kernel
 mathruler
 numpy

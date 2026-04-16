@@ -15,6 +15,8 @@
 import json
 
 import ray
+ray.init(runtime_env={"env_vars": {"RAY_DEBUG": "legacy"}})
+
 from omegaconf import OmegaConf
 
 from ..single_controller.ray import RayWorkerGroup

@@ -21,7 +21,7 @@ from ..protocol import DataProto
 
 
 def reduce_metrics(metrics: dict[str, list[Any]]) -> dict[str, Any]:
-    return {key: np.mean(value) for key, value in metrics.items()}
+    return {key: (value if isinstance(value, (int, float, str)) else np.mean(value)) for key, value in metrics.items()}
 
 
 def compute_length_metrics(batch: DataProto) -> dict[str, Any]:

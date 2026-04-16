@@ -20,7 +20,7 @@ from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from typing import Optional, Tuple
 
 from ..utils.py_functional import get_abs_path
-from ..workers.config import WorkerConfig
+from ..workers.config import DataConfig, WorkerConfig
 
 
 def recursive_post_init(dataclass_obj):
@@ -30,36 +30,6 @@ def recursive_post_init(dataclass_obj):
     for attr in fields(dataclass_obj):
         if is_dataclass(getattr(dataclass_obj, attr.name)):
             recursive_post_init(getattr(dataclass_obj, attr.name))
-
-
-@dataclass
-class DataConfig:
-    train_files: str = ""
-    val_files: str = ""
-    prompt_key: str = "prompt"
-    answer_key: str = "answer"
-    image_key: str = "images"
-    video_key: str = "videos"
-    image_dir: Optional[str] = None
-    video_fps: float = 2.0
-    max_prompt_length: int = 512
-    max_response_length: int = 512
-    rollout_batch_size: int = 512
-    mini_rollout_batch_size: Optional[int] = None
-    val_batch_size: int = -1
-    format_prompt: Optional[str] = None
-    override_chat_template: Optional[str] = None
-    shuffle: bool = True
-    seed: int = 1
-    min_pixels: Optional[int] = 262144
-    max_pixels: Optional[int] = 4194304
-    filter_overlong_prompts: bool = True
-    filter_overlong_prompts_workers: int = 16
-
-    def post_init(self):
-        self.image_dir = get_abs_path(self.image_dir, prompt="Image directory")
-        self.format_prompt = get_abs_path(self.format_prompt, prompt="Format prompt file")
-        self.override_chat_template = get_abs_path(self.override_chat_template, prompt="Chat template file")
 
 
 @dataclass
@@ -92,6 +62,11 @@ class AlgorithmConfig:
     """filter out low reward samples if online filtering"""
     filter_high: float = 0.99
     """filter out high reward samples if online filtering"""
+    
+    compute_guidance_gap: bool = False
+    guidance_gap_type: str = "kl"
+    entropy_penalty_coef: float = 0.0
+    
 
 
 @dataclass
@@ -160,6 +135,9 @@ class PPOConfig:
         self.worker.actor.use_kl_loss = self.algorithm.use_kl_loss
         self.worker.actor.kl_penalty = self.algorithm.kl_penalty
         self.worker.actor.kl_coef = self.algorithm.kl_coef
+        self.worker.actor.entropy_penalty_coef = self.algorithm.entropy_penalty_coef
+        # Sync data config to worker.data
+        self.worker.data = self.data
 
     def deep_post_init(self):
         recursive_post_init(self)

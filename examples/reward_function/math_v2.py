@@ -18,11 +18,6 @@ from typing import Any
 from mathruler.grader import extract_boxed_content, grade_answer
 
 
-# Metadata
-REWARD_NAME = "math"
-REWARD_TYPE = "batch"
-
-
 def format_reward(response: str) -> float:
     pattern = re.compile(r"<think>.*</think>.*\\boxed\{.*\}.*", re.DOTALL)
     format_match = re.fullmatch(pattern, response)

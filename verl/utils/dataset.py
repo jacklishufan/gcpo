@@ -112,6 +112,10 @@ class RLHFDataset(Dataset):
         max_pixels: Optional[int] = None,
         filter_overlong_prompts: bool = True,
         filter_overlong_prompts_workers: int = 16,
+        max_val_samples:int = -1,
+        use_importance_weighting: bool = False,
+        negative_prompt_type: str = "wrong_answer",
+        negative_format_prompt: Optional[str] = None,
     ):
         self.tokenizer = tokenizer
         self.processor = processor
@@ -125,6 +129,12 @@ class RLHFDataset(Dataset):
         self.truncation = truncation
         self.min_pixels = min_pixels
         self.max_pixels = max_pixels
+        self.use_importance_weighting = use_importance_weighting
+        self.negative_prompt_type = negative_prompt_type
+        self.negative_format_prompt = None
+        if negative_format_prompt:
+            with open(negative_format_prompt, encoding="utf-8") as f:
+                self.negative_format_prompt = f.read()
 
         if "@" in data_path:
             data_path, data_split = data_path.split("@")
@@ -141,7 +151,10 @@ class RLHFDataset(Dataset):
         else:
             # load remote dataset from huggingface hub
             self.dataset = load_dataset(data_path, split=data_split)
-
+        if max_val_samples > 0:
+            shuffled_dataset = self.dataset.shuffle(seed=42)
+            random_subset = shuffled_dataset.select(range(max_val_samples))
+            self.dataset = random_subset
         self.format_prompt = None
         if format_prompt:
             with open(format_prompt, encoding="utf-8") as f:
@@ -222,6 +235,114 @@ class RLHFDataset(Dataset):
     def __getitem__(self, index):
         example: dict = self.dataset[index]
         messages = self._build_messages(example)
+        
+        # Store the original prompt for importance weighting BEFORE processing
+        original_prompt_text = example[self.prompt_key]
+        
+        # Process negative prompt for importance weighting BEFORE popping the key
+        negative_input_ids_aug = None
+        negative_attention_mask_aug = None
+        negative_position_ids_aug = None
+        
+        if self.use_importance_weighting:
+            negative_prompt = self.create_negative_prompt(original_prompt_text)
+            
+            # Create a dict for _build_messages with the correct keys
+            negative_example = {self.prompt_key: negative_prompt}
+            
+            # Add image/video keys if they exist in the original data
+            if self.image_key in example:
+                negative_example[self.image_key] = example[self.image_key]
+            if self.video_key in example:
+                negative_example[self.video_key] = example[self.video_key]
+            
+            # Create negative prompt messages and tokenize
+            if self.image_key in example:
+                # Handle image case
+                negative_messages = self._build_messages(negative_example)
+                negative_prompt_text = self.processor.apply_chat_template(negative_messages, add_generation_prompt=True, tokenize=False)
+                
+                # Use same images but create negative prompt
+                images = example[self.image_key]
+                processed_images = [] if len(images) != 0 else None
+                for image in images:
+                    processed_images.append(process_image(image, self.min_pixels, self.max_pixels))
+
+                negative_model_inputs = self.processor(processed_images, [negative_prompt_text], add_special_tokens=False, return_tensors="pt")
+                negative_input_ids = negative_model_inputs.pop("input_ids")[0]
+                negative_attention_mask = negative_model_inputs.pop("attention_mask")[0]
+                
+            elif self.video_key in example:
+                # Handle video case  
+                negative_messages = self._build_messages(negative_example)
+                negative_prompt_text = self.processor.apply_chat_template(negative_messages, add_generation_prompt=True, tokenize=False)
+                
+                # Use same videos
+                videos = example[self.video_key]
+                processed_videos = [] if len(videos) != 0 else None
+                video_fps_list = []
+                for video in videos:
+                    processed_video, video_fps = process_video(
+                        video, self.min_pixels, self.max_pixels, self.video_fps, return_fps=True
+                    )
+                    processed_videos.append(processed_video)
+                    video_fps_list.append(video_fps)
+
+                negative_model_inputs = self.processor(
+                    videos=processed_videos, text=[negative_prompt_text], add_special_tokens=False, return_tensors="pt"
+                )
+                if "second_per_grid_ts" in self.processor.model_input_names:
+                    negative_model_inputs["second_per_grid_ts"] = [2.0 / video_sample_fps for video_sample_fps in video_fps_list]
+
+                negative_input_ids = negative_model_inputs.pop("input_ids")[0]
+                negative_attention_mask = negative_model_inputs.pop("attention_mask")[0]
+                
+            else:
+                # Handle text-only case
+                negative_messages = self._build_messages(negative_example)
+                negative_prompt_text = self.tokenizer.apply_chat_template(negative_messages, add_generation_prompt=True, tokenize=False)
+                negative_model_inputs = self.tokenizer([negative_prompt_text], add_special_tokens=False, return_tensors="pt")
+                negative_input_ids = negative_model_inputs.pop("input_ids")[0]
+                negative_attention_mask = negative_model_inputs.pop("attention_mask")[0]
+
+            # Process negative inputs the same way as positive inputs
+            if self.processor is not None and "Qwen2VLImageProcessor" in self.processor.image_processor.__class__.__name__:
+                # qwen-vl mrope
+                if "Qwen3VLProcessor" in self.processor.__class__.__name__:
+                    from ..models.transformers.qwen3_vl import get_rope_index
+                else:
+                    from ..models.transformers.qwen2_vl import get_rope_index
+
+                negative_vision_position_ids = get_rope_index(
+                    self.processor,
+                    input_ids=negative_input_ids,
+                    image_grid_thw=negative_model_inputs.get("image_grid_thw", None),
+                    video_grid_thw=negative_model_inputs.get("video_grid_thw", None),
+                    second_per_grid_ts=negative_model_inputs.get("second_per_grid_ts", None),
+                    attention_mask=negative_attention_mask,
+                )  # (3, seq_length)
+                negative_text_position_ids = torch.arange(len(negative_input_ids)).unsqueeze(0)  # (1, seq_length)
+                negative_position_ids = torch.cat((negative_text_position_ids, negative_vision_position_ids), dim=0)  # (4, seq_length)
+            else:
+                negative_position_ids = torch.clip(negative_attention_mask.cumsum(dim=0) - 1, min=0, max=None)  # (seq_length,)
+
+            negative_input_ids, negative_attention_mask, negative_position_ids = VF.postprocess_data(
+                input_ids=negative_input_ids,
+                attention_mask=negative_attention_mask,
+                position_ids=negative_position_ids,
+                max_length=self.max_prompt_length,
+                pad_token_id=self.tokenizer.pad_token_id,
+                left_pad=True,
+                truncation=self.truncation,
+            )
+            
+            # Store the augmented inputs for later
+            negative_input_ids_aug = negative_input_ids
+            negative_attention_mask_aug = negative_attention_mask
+            negative_position_ids_aug = negative_position_ids
+        
+        # NOW pop the prompt_key and store as "problem"
+        example["problem"] = original_prompt_text
         example.pop(self.prompt_key, None)
 
         if self.image_key in example:
@@ -311,4 +432,31 @@ class RLHFDataset(Dataset):
         example["position_ids"] = position_ids
         example["raw_prompt_ids"] = raw_prompt_ids
         example["ground_truth"] = example.pop(self.answer_key)
+        
+        # Add augmented inputs if importance weighting was done
+        if negative_input_ids_aug is not None:
+            example["input_ids_aug"] = negative_input_ids_aug
+            example["attention_mask_aug"] = negative_attention_mask_aug
+            example["position_ids_aug"] = negative_position_ids_aug
+
         return example
+
+    def create_negative_prompt(self, prompt: str) -> str:
+        if not self.use_importance_weighting:
+            return prompt
+
+        if self.negative_format_prompt is not None:
+            # Use the user-supplied jinja template.
+            # For empty_prompt-style templates the {{ content }} variable is simply ignored.
+            tpl = Template(self.negative_format_prompt.strip())
+            return tpl.render(content=prompt)
+
+        # Fallback to built-in defaults when no template file is provided.
+        if self.negative_prompt_type == "wrong_answer":
+            return prompt + ", but generate the wrong answer"
+        elif self.negative_prompt_type == "empty_prompt":
+            return "answer the question"
+        elif self.negative_prompt_type == "empty_image":
+            return prompt  # same prompt, image is replaced in __getitem__
+        else:
+            return prompt

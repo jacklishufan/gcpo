@@ -1,0 +1,151 @@
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Importance Heatmap (AR Model)</title>
+    <style>
+        body {
+            margin: 24px;
+            font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+            color: #222;
+            background: #fafafa;
+        }
+        .card {
+            background: #fff;
+            border: 1px solid #e6e6e6;
+            border-radius: 12px;
+            padding: 16px;
+            margin-bottom: 16px;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+        }
+        .label {
+            font-size: 13px;
+            color: #666;
+            margin-bottom: 6px;
+        }
+        .controls {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+        .select {
+            font: inherit;
+            padding: 6px 10px;
+            border-radius: 8px;
+            border: 1px solid #d0d0d0;
+            background: #fff;
+        }
+        .text {
+            white-space: pre-wrap;
+            line-height: 1.5;
+        }
+        .tokens {
+            line-height: 2.0;
+        }
+        .tok {
+            display: inline-block;
+            margin: 2px 3px 2px 0;
+            padding: 3px 7px;
+            border-radius: 999px;
+            border: 1px solid rgba(0,0,0,0.08);
+            font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+            font-size: 12px;
+        }
+        .legend {
+            height: 12px;
+            border-radius: 999px;
+            background: linear-gradient(90deg, rgb(230,243,255), rgb(220,53,69));
+            border: 1px solid #ddd;
+            margin-top: 8px;
+        }
+        .legend-labels {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            color: #666;
+            margin-top: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="label">Question</div>
+        <div class="text">What is the capital of France?</div>
+    </div>
+
+    <div class="card">
+        <div class="label">Negative Prompt</div>
+        <div class="text">What is the capital of France? Give me the WRONG answer.</div>
+    </div>
+
+    <div class="card">
+        <div class="label">Answer</div>
+        <div class="text">The capital of France is Paris.</div>
+    </div>
+
+    <div class="card">
+        <div class="label">Token Importance Heatmap (AR Model)</div>
+        <div class="controls">
+            <label for="metric-select">Divergence metric</label>
+            <select id="metric-select" class="select"><option value="abs" selected>abs</option><option value="kl">kl</option><option value="information_gain">information_gain</option></select>
+        </div>
+        <div class="tokens" id="tokens"></div>
+        <div class="legend"></div>
+        <div class="legend-labels"><span id="legend-low"></span><span id="legend-high"></span></div>
+    </div>
+
+    <script>
+        const payload = {"tokens": ["The", "\u0120capital", "\u0120of", "\u0120France", "\u0120is", "\u0120Paris", "."], "displayTokens": ["The", " capital", " of", " France", " is", " Paris", "."], "weightsByMetric": {"abs": [0.005706787109375, 0.271484375, 1.9222497940063477e-06, 1.0192394256591797e-05, 0.0, 1.0, 0.0001811981201171875], "kl": [0.02734375, 1.0, 0.0, 3.7670135498046875e-05, 6.258487701416016e-07, 0.859375, 0.0004405975341796875], "information_gain": [0.01019287109375, 0.484375, 3.427267074584961e-06, 1.823902130126953e-05, 0.0, 1.0, 0.0003223419189453125]}, "selectedMetric": "abs"};
+
+        function weightToRgb(weight, wMin, wMax) {
+            let x = 0.0;
+            if (wMax > wMin) {
+                x = (weight - wMin) / (wMax - wMin);
+            }
+            const r0 = 230;
+            const g0 = 243;
+            const b0 = 255;
+            const r1 = 220;
+            const g1 = 53;
+            const b1 = 69;
+            const r = Math.round(r0 + (r1 - r0) * x);
+            const g = Math.round(g0 + (g1 - g0) * x);
+            const b = Math.round(b0 + (b1 - b0) * x);
+            return [r, g, b];
+        }
+
+        function escapeHtml(text) {
+            return text
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;');
+        }
+
+        function renderMetric(metric) {
+            const weights = payload.weightsByMetric[metric];
+            const wMin = Math.min(...weights);
+            const wMax = Math.max(...weights);
+            const container = document.getElementById('tokens');
+            const spans = payload.tokens.map((token, index) => {
+                const display = escapeHtml(payload.displayTokens[index]);
+                const rawToken = escapeHtml(token);
+                const weight = weights[index];
+                const [r, g, b] = weightToRgb(weight, wMin, wMax);
+                const luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+                const textColor = luminance > 160 ? '#111' : '#fff';
+                return `<span class="tok" style="background: rgb(${r},${g},${b}); color: ${textColor};" title="token=${rawToken} | metric=${metric} | weight=${weight.toFixed(6)}">${display}</span>`;
+            });
+            container.innerHTML = spans.join('');
+            document.getElementById('legend-low').textContent = `low (${wMin.toFixed(4)})`;
+            document.getElementById('legend-high').textContent = `high (${wMax.toFixed(4)})`;
+        }
+
+        const metricSelect = document.getElementById('metric-select');
+        metricSelect.addEventListener('change', (event) => renderMetric(event.target.value));
+        renderMetric(payload.selectedMetric);
+    </script>
+</body>
+</html>

@@ -20,7 +20,7 @@ from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
 from ..utils.dataset import RLHFDataset, collate_fn
-from .config import DataConfig
+from ..workers.config import DataConfig
 
 
 def create_dataloader(config: DataConfig, tokenizer: PreTrainedTokenizer, processor: Optional[ProcessorMixin]) -> None:
@@ -41,6 +41,9 @@ def create_dataloader(config: DataConfig, tokenizer: PreTrainedTokenizer, proces
         max_pixels=config.max_pixels,
         filter_overlong_prompts=config.filter_overlong_prompts,
         filter_overlong_prompts_workers=config.filter_overlong_prompts_workers,
+        use_importance_weighting=config.use_importance_weighting,
+        negative_prompt_type=config.negative_prompt_type,
+        negative_format_prompt=config.negative_format_prompt,
     )
     # use sampler for better ckpt resume
     if config.shuffle:
@@ -81,6 +84,10 @@ def create_dataloader(config: DataConfig, tokenizer: PreTrainedTokenizer, proces
         min_pixels=config.min_pixels,
         max_pixels=config.max_pixels,
         filter_overlong_prompts=config.filter_overlong_prompts,
+        max_val_samples=getattr(config, "max_val_samples", -1),
+        use_importance_weighting=config.use_importance_weighting,
+        negative_prompt_type=config.negative_prompt_type,
+        negative_format_prompt=config.negative_format_prompt,
     )
 
     if config.val_batch_size == -1:
