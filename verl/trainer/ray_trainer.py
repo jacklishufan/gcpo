@@ -390,22 +390,22 @@ class RayPPOTrainer:
         samples = samples[: self.config.trainer.val_generations_to_log]
         self.logger.log_generation(samples, self.global_step)
 
-    def _validate(self) -> dict[str, Any]:
+    def _validate_single_dataloader(
+        self, val_dataloader: StatefulDataLoader, metric_prefix: str = "val", legacy_length_prefix: bool = True
+    ) -> dict[str, Any]:
         reward_tensor_lst = []
         # Lists to collect samples for the table
         sample_inputs, sample_outputs, sample_labels, sample_scores = [], [], [], []
         reward_metrics_lst = defaultdict(list)
         length_metrics_lst = defaultdict(list)
-        print("Start validation...")
-        self.actor_rollout_ref_wg.prepare_rollout_engine()
-        for batch_dict in self.val_dataloader:
+        for batch_dict in val_dataloader:
             test_batch = DataProto.from_single_dict(batch_dict)
             test_gen_batch = test_batch.pop(
                 batch_keys=["input_ids", "attention_mask", "position_ids"],
                 non_tensor_batch_keys=["raw_prompt_ids", "multi_modal_data"],
             )
-            repeat_times = self.config.worker.rollout.val_override_config.get("n", 1)
-            test_gen_batch.meta_info = self.config.worker.rollout.val_override_config
+            repeat_times = self.config.worker.rollout.val_override_config.get("n", self.config.worker.rollout.n)
+            test_gen_batch.meta_info = dict(self.config.worker.rollout.val_override_config)
             test_gen_batch.meta_info["min_pixels"] = self.config.data.min_pixels
             test_gen_batch.meta_info["max_pixels"] = self.config.data.max_pixels
             test_gen_batch.meta_info["video_fps"] = self.config.data.video_fps
@@ -439,13 +439,40 @@ class RayPPOTrainer:
             for key, value in compute_length_metrics(test_batch).items():
                 length_metrics_lst[key].append(value)
 
-        self.actor_rollout_ref_wg.release_rollout_engine()
         self._maybe_log_val_generations(sample_inputs, sample_outputs, sample_labels, sample_scores)
-        self.val_reward_score = torch.cat(reward_tensor_lst, dim=0).sum(-1).mean().item()
-        val_reward_metrics = {f"val/{key}_reward": value for key, value in reduce_metrics(reward_metrics_lst).items()}
-        val_length_metrics = {f"val_{key}": value for key, value in reduce_metrics(length_metrics_lst).items()}
+        val_reward_score = torch.cat(reward_tensor_lst, dim=0).sum(-1).mean().item()
+        val_reward_metrics = {
+            f"{metric_prefix}/{key}_reward": value for key, value in reduce_metrics(reward_metrics_lst).items()
+        }
+        if legacy_length_prefix:
+            val_length_metrics = {f"val_{key}": value for key, value in reduce_metrics(length_metrics_lst).items()}
+        else:
+            val_length_metrics = {f"{metric_prefix}/{key}": value for key, value in reduce_metrics(length_metrics_lst).items()}
+        return {f"{metric_prefix}/reward_score": val_reward_score, **val_reward_metrics, **val_length_metrics}
+
+    def _validate(self) -> dict[str, Any]:
+        print("Start validation...")
+        self.actor_rollout_ref_wg.prepare_rollout_engine()
+        if isinstance(self.val_dataloader, dict):
+            val_metrics = {}
+            reward_scores = []
+            for dataset_name, val_dataloader in self.val_dataloader.items():
+                print(f"Start validating dataset: {dataset_name}")
+                dataset_metrics = self._validate_single_dataloader(
+                    val_dataloader, metric_prefix=f"val/{dataset_name}", legacy_length_prefix=False
+                )
+                val_metrics.update(dataset_metrics)
+                reward_scores.append(dataset_metrics[f"val/{dataset_name}/reward_score"])
+
+            self.val_reward_score = float(np.mean(reward_scores)) if reward_scores else 0.0
+            val_metrics["val/reward_score"] = self.val_reward_score
+        else:
+            val_metrics = self._validate_single_dataloader(self.val_dataloader)
+            self.val_reward_score = val_metrics["val/reward_score"]
+
+        self.actor_rollout_ref_wg.release_rollout_engine()
         print("Finish validation.")
-        return {"val/reward_score": self.val_reward_score, **val_reward_metrics, **val_length_metrics}
+        return val_metrics
 
     def _balance_batch(self, batch: DataProto, metrics: dict[str, Any], logging_prefix: str = "global_seqlen") -> None:
         """Reorder the data on single controller such that each dp rank gets similar total tokens"""

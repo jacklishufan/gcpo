@@ -213,7 +213,7 @@ class DataParallelPPOActor(BasePPOActor):
                 cap = valid_vals.quantile(0.9) if valid_vals.numel() > 0 else raw_ig.float().quantile(0.9)
             else:
                 cap = raw_ig.float().quantile(0.9)
-            divergences = raw_ig.clamp(min=0, max=cap)
+            divergences = raw_ig #.clamp(min=0, max=cap)
         elif self.data_config.importance_weighting_type == "kl":
             # Pointwise KL using stable low-variance estimator (Schulman 2020)
             # KL(q || p) = E_q[log q - log p] ≈ e^(log p - log q) - (log p - log q) - 1
@@ -314,8 +314,39 @@ class DataParallelPPOActor(BasePPOActor):
                 w = torch.zeros(N, dtype=divergences.dtype, device=divergences.device)
                 w[top_indices] = w_top
                 weights[i][valid_mask] = w
+        elif self.data_config.importance_normalization.startswith("filter_uniform("):
+            # filter(p): zero out bottom (1-p)% of tokens (per sequence, ignoring padding),
+            # then renormalize the surviving top-p% divergences to sum == num_valid_tokens.
+            m = re.match(r"filter_uniform\((\d+(?:\.\d+)?)\)", self.data_config.importance_normalization)
+            if m is None:
+                raise ValueError(f"Invalid filter normalization format: {self.data_config.importance_normalization}. Expected filter(p).")
+            p = float(m.group(1)) / 100.0  # fraction to keep, e.g. 0.40
+            weights = torch.zeros_like(divergences)
+            bs = divergences.size(0)
+            for i in range(bs):
+                valid_mask = response_mask[i].bool() if response_mask is not None else torch.ones(divergences.size(1), dtype=torch.bool, device=divergences.device)
+                valid_divs = divergences[i][valid_mask]
+                N = valid_divs.size(0)
+                if N == 0:
+                    continue
+                k = max(1, math.ceil(p * N))  # number of top tokens to keep
+                # Select top-k indices within valid tokens
+                _, top_indices = valid_divs.topk(k, largest=True, sorted=False)
+                top_vals = valid_divs[top_indices]
+                # Shift to non-negative then renormalize so surviving weights sum to N
+                # top_vals_shifted = top_vals_shifted * 0 + 1
+                # top_sum = top_vals_shifted.sum()
+                # if top_sum < 1e-8:
+                #     # Uniform among survivors
+                #     w_top = torch.full((k,), N / k, dtype=divergences.dtype, device=divergences.device)
+                # else:
+                #     w_top = top_vals_shifted / top_sum * N
+                w_top = torch.full((k,),N / k, dtype=divergences.dtype, device=divergences.device)
+                w = torch.zeros(N, dtype=divergences.dtype, device=divergences.device)
+                w[top_indices] = w_top
+                weights[i][valid_mask] = w
         else:
-            weights = divergences
+            raise ValueError("Unknown Normalizaion")
 
         return weights
 

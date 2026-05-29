@@ -22,6 +22,7 @@ import re
 from contextlib import contextmanager
 from functools import lru_cache
 from typing import Any, Optional, Union
+from urllib.parse import urlparse
 
 import numpy as np
 import yaml
@@ -122,6 +123,9 @@ def convert_dict_to_str(data: dict[str, Any]) -> str:
 
 def get_abs_path(path: str, prompt: str = "File") -> Optional[str]:
     if path is not None:
+        parsed = urlparse(path)
+        if parsed.scheme in ("http", "https"):
+            return path
         if os.path.exists(path):  # ray job uses absolute path
             return os.path.abspath(path)
         else:

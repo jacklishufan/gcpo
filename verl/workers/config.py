@@ -28,8 +28,18 @@ from typing import Optional
 class DataConfig:
     train_files: str = ""
     val_files: str = ""
+    eval_json_files: Optional[str] = None
+    """optional message-format JSON/JSONL eval data used by main_eval.py"""
+    eval_image_root: Optional[str] = None
+    """root directory for relative image/video paths in eval_json_files"""
+    eval_dataset_config: Optional[str] = None
+    """optional YAML eval suite config used by main_eval.py"""
     prompt_key: str = "prompt"
     answer_key: str = "answer"
+    val_prompt_key: Optional[str] = None
+    """Override prompt_key for the validation dataset. Falls back to prompt_key when None."""
+    val_answer_key: Optional[str] = None
+    """Override answer_key for the validation dataset. Falls back to answer_key when None."""
     image_key: str = "images"
     video_key: str = "videos"
     image_dir: Optional[str] = None
@@ -47,6 +57,7 @@ class DataConfig:
     max_pixels: Optional[int] = 4194304
     filter_overlong_prompts: bool = True
     filter_overlong_prompts_workers: int = 16
+    max_val_samples: int = -1
     # Importance weighting config
     use_importance_weighting: bool = False
     importance_weighting_type: str = "kl"
@@ -57,6 +68,9 @@ class DataConfig:
 
     def post_init(self):
         self.image_dir = get_abs_path(self.image_dir, prompt="Image directory")
+        self.eval_json_files = get_abs_path(self.eval_json_files, prompt="Eval JSON files")
+        self.eval_image_root = get_abs_path(self.eval_image_root, prompt="Eval image root")
+        self.eval_dataset_config = get_abs_path(self.eval_dataset_config, prompt="Eval dataset config")
         self.format_prompt = get_abs_path(self.format_prompt, prompt="Format prompt file")
         self.negative_format_prompt = get_abs_path(self.negative_format_prompt, prompt="Negative format prompt file")
         self.override_chat_template = get_abs_path(self.override_chat_template, prompt="Chat template file")

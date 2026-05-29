@@ -14,13 +14,15 @@
 
 import math
 import os
+import urllib.request
 from collections import defaultdict
 from io import BytesIO
 from typing import Any, Optional, Union
+from urllib.parse import urljoin, urlparse
 
 import numpy as np
 import torch
-from datasets import load_dataset
+from datasets import Dataset as HFDataset, load_dataset
 from jinja2 import Template
 from PIL import Image
 from PIL.Image import Image as ImageObject
@@ -29,6 +31,18 @@ from torch.utils.data import Dataset
 from transformers import PreTrainedTokenizer, ProcessorMixin
 
 from . import torch_functional as VF
+
+
+def _is_url(path: str) -> bool:
+    return urlparse(path).scheme in ("http", "https")
+
+
+def _join_path_or_url(root: str, path: str) -> str:
+    if _is_url(path):
+        return path
+    if _is_url(root):
+        return urljoin(root.rstrip("/") + "/", path.lstrip("./"))
+    return os.path.join(root, path)
 
 
 def collate_fn(features: list[dict[str, Any]]) -> dict[str, Any]:
@@ -54,7 +68,11 @@ def process_image(
     image: Union[dict[str, Any], ImageObject, str], min_pixels: Optional[int], max_pixels: Optional[int]
 ) -> ImageObject:
     if isinstance(image, str):
-        image = Image.open(image)
+        if _is_url(image):
+            with urllib.request.urlopen(image, timeout=60) as response:
+                image = Image.open(BytesIO(response.read()))
+        else:
+            image = Image.open(image)
     elif isinstance(image, dict):
         image = Image.open(BytesIO(image["bytes"]))
     elif isinstance(image, bytes):
@@ -116,6 +134,7 @@ class RLHFDataset(Dataset):
         use_importance_weighting: bool = False,
         negative_prompt_type: str = "wrong_answer",
         negative_format_prompt: Optional[str] = None,
+        records: Optional[list[dict[str, Any]]] = None,
     ):
         self.tokenizer = tokenizer
         self.processor = processor
@@ -136,24 +155,27 @@ class RLHFDataset(Dataset):
             with open(negative_format_prompt, encoding="utf-8") as f:
                 self.negative_format_prompt = f.read()
 
-        if "@" in data_path:
-            data_path, data_split = data_path.split("@")
+        if records is not None:
+            self.dataset = HFDataset.from_list(records)
         else:
-            data_split = "train"
+            if "@" in data_path:
+                data_path, data_split = data_path.split("@")
+            else:
+                data_split = "train"
 
-        if os.path.isdir(data_path):
-            # when we use dataset builder, we should always refer to the train split
-            file_type = os.path.splitext(os.listdir(data_path)[0])[-1][1:].replace("jsonl", "json")
-            self.dataset = load_dataset(file_type, data_dir=data_path, split=data_split)
-        elif os.path.isfile(data_path):
-            file_type = os.path.splitext(data_path)[-1][1:].replace("jsonl", "json")
-            self.dataset = load_dataset(file_type, data_files=data_path, split=data_split)
-        else:
-            # load remote dataset from huggingface hub
-            self.dataset = load_dataset(data_path, split=data_split)
+            if os.path.isdir(data_path):
+                # when we use dataset builder, we should always refer to the train split
+                file_type = os.path.splitext(os.listdir(data_path)[0])[-1][1:].replace("jsonl", "json")
+                self.dataset = load_dataset(file_type, data_dir=data_path, split=data_split)
+            elif os.path.isfile(data_path):
+                file_type = os.path.splitext(data_path)[-1][1:].replace("jsonl", "json")
+                self.dataset = load_dataset(file_type, data_files=data_path, split=data_split)
+            else:
+                # load remote dataset from huggingface hub
+                self.dataset = load_dataset(data_path, split=data_split)
         if max_val_samples > 0:
             shuffled_dataset = self.dataset.shuffle(seed=42)
-            random_subset = shuffled_dataset.select(range(max_val_samples))
+            random_subset = shuffled_dataset.select(range(min(max_val_samples, len(shuffled_dataset))))
             self.dataset = random_subset
         self.format_prompt = None
         if format_prompt:
@@ -203,7 +225,7 @@ class RLHFDataset(Dataset):
             prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
             images = example[self.image_key]
             if self.image_dir is not None and len(images) != 0 and isinstance(images[0], str):  # image paths
-                images = [os.path.join(self.image_dir, image) for image in images]
+                images = [_join_path_or_url(self.image_dir, image) for image in images]
 
             processed_images = [] if len(images) != 0 else None  # text-only data
             for image in images:
@@ -215,7 +237,7 @@ class RLHFDataset(Dataset):
             prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
             videos = example[self.video_key]
             if self.image_dir is not None and len(videos) != 0 and isinstance(videos[0], str):  # video paths
-                videos = [os.path.join(self.image_dir, video) for video in videos]
+                videos = [_join_path_or_url(self.image_dir, video) for video in videos]
 
             processed_videos = [] if len(videos) != 0 else None  # text-only data
             for video in videos:
@@ -264,6 +286,9 @@ class RLHFDataset(Dataset):
                 
                 # Use same images but create negative prompt
                 images = example[self.image_key]
+                if self.image_dir is not None and len(images) != 0 and isinstance(images[0], str):  # image paths
+                    images = [_join_path_or_url(self.image_dir, image) for image in images]
+
                 processed_images = [] if len(images) != 0 else None
                 for image in images:
                     processed_images.append(process_image(image, self.min_pixels, self.max_pixels))
@@ -349,7 +374,7 @@ class RLHFDataset(Dataset):
             prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
             images = example.pop(self.image_key)
             if self.image_dir is not None and len(images) != 0 and isinstance(images[0], str):  # image paths
-                images = [os.path.join(self.image_dir, image) for image in images]
+                images = [_join_path_or_url(self.image_dir, image) for image in images]
 
             processed_images = [] if len(images) != 0 else None  # text-only data
             for image in images:
@@ -363,7 +388,7 @@ class RLHFDataset(Dataset):
             prompt = self.processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
             videos = example.pop(self.video_key)
             if self.image_dir is not None and len(videos) != 0 and isinstance(videos[0], str):  # video paths
-                videos = [os.path.join(self.image_dir, video) for video in videos]
+                videos = [_join_path_or_url(self.image_dir, video) for video in videos]
 
             processed_videos = [] if len(videos) != 0 else None  # text-only data
             video_fps_list = []
